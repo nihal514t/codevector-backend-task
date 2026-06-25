@@ -1,13 +1,15 @@
 const pool = require("../db");
 
 const DEFAULT_LIMIT = 20;
+const MAX_LIMIT = 100;
 
-function encodeCursor(product) {
+function encodeCursor(product, snapshot) {
   return Buffer.from(
     JSON.stringify({
       updated_at: product.updated_at,
       id: product.id,
-    }),
+      snapshot,
+    })
   ).toString("base64");
 }
 
@@ -23,23 +25,22 @@ async function getProducts(req, res) {
       limit = DEFAULT_LIMIT;
     }
 
-    limit = Math.min(limit, 100);
-    const category = req.query.category;
-    const cursor = req.query.cursor;
+    limit = Math.min(limit, MAX_LIMIT);
 
-    let query = `
-      SELECT *
-      FROM products
-    `;
+    const { category, cursor } = req.query;
 
-    const values = [];
+    let snapshot = new Date().toISOString();
+
     const conditions = [];
+    const values = [];
 
+    // Category filter
     if (category) {
       values.push(category);
       conditions.push(`category = $${values.length}`);
     }
 
+    // First request vs subsequent requests
     if (cursor) {
       let decoded;
 
@@ -51,13 +52,32 @@ async function getProducts(req, res) {
         });
       }
 
+      snapshot = decoded.snapshot;
+
+      // Freeze dataset to snapshot
+      values.push(snapshot);
+      conditions.push(`updated_at <= $${values.length}`);
+
+      // Cursor pagination
       values.push(decoded.updated_at);
+      const updatedAtIndex = values.length;
+
       values.push(decoded.id);
+      const idIndex = values.length;
 
       conditions.push(
-        `(updated_at, id) < ($${values.length - 1}, $${values.length})`,
+        `(updated_at, id) < ($${updatedAtIndex}, $${idIndex})`
       );
+    } else {
+      // First page: establish snapshot
+      values.push(snapshot);
+      conditions.push(`updated_at <= $${values.length}`);
     }
+
+    let query = `
+      SELECT *
+      FROM products
+    `;
 
     if (conditions.length > 0) {
       query += ` WHERE ${conditions.join(" AND ")}`;
@@ -75,22 +95,24 @@ async function getProducts(req, res) {
     let nextCursor = null;
 
     if (result.rows.length > 0) {
-      nextCursor = encodeCursor(result.rows[result.rows.length - 1]);
+      nextCursor = encodeCursor(
+        result.rows[result.rows.length - 1],
+        snapshot
+      );
     }
 
-    res.json({
+    res.status(200).json({
       products: result.rows,
       nextCursor,
     });
   } catch (error) {
     console.error(error);
+
     res.status(500).json({
       message: "Internal Server Error",
     });
   }
 }
-
-
 
 module.exports = {
   getProducts,
